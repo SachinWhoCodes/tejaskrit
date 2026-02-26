@@ -15,7 +15,7 @@ export default function AccessDenied() {
           Please contact your institute's TPO if you believe this is an error.
         </p>
         <Button asChild>
-          <Link to="/">Return to Dashboard</Link>
+          <Link to="/login">Return to Dashboard</Link>
         </Button>
       </div>
     </div>
