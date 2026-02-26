@@ -31,7 +31,7 @@ import {
   listRecommendations,
   listUpcomingEvents,
 } from "@/lib/firestore";
-import { generateTailoredLatex } from "@/lib/api";
+import { generateTailoredLatex, refreshAiMatchScores } from "@/lib/api";
 import type { JobDoc } from "@/lib/types";
 import { computeMatch } from "@/lib/match";
 import { sourceLabel } from "@/lib/mappers";
@@ -214,6 +214,19 @@ export default function Dashboard() {
             </motion.div>
           ))}
         </div>
+
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={async () => {
+            const topIds = filtered.slice(0, 12).map(j => j.id);
+            await refreshAiMatchScores(topIds);
+            qc.invalidateQueries({ queryKey: ["recommendations", authUser!.uid] });
+            qc.invalidateQueries({ queryKey: ["applications", authUser!.uid] });
+          }}
+        >
+          AI Score Top Jobs
+        </Button>
 
         {/* Priority Opportunities */}
         <section>

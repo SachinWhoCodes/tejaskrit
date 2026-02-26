@@ -46,3 +46,21 @@ export async function downloadResumePdf(applicationId: string) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+
+
+export async function refreshAiMatchScores(jobIds: string[]) {
+  const token = await getIdToken();
+  const res = await fetch("/api/match/refresh", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ jobIds }),
+  });
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json?.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+  return json as { ok: true; results: Array<{ jobId: string; score: number; reasons: string[] }> };
+}
