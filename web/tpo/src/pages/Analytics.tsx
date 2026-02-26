@@ -1,138 +1,367 @@
-import { useState } from "react";
-import { Download } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Download, Loader2 } from "lucide-react";
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  PieChart,
+  Pie,
+} from "recharts";
+
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { analyticsChartData } from "@/lib/mock-data";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Cell } from "recharts";
+import { Badge } from "@/components/ui/badge";
 
-const tabs = ["Placement Funnel", "Company Performance", "Branch/Batch Insights", "Time Trends"];
+import { useAuth } from "@/auth/AuthProvider";
+import { db } from "@/lib/firebase";
+import {
+  collection,
+  onSnapshot,
+  query,
+  Timestamp,
+  where,
+} from "firebase/firestore";
+import { downloadCSV } from "@/lib/download";
 
-const funnelColors = [
-  "hsl(238, 55%, 48%)",
-  "hsl(238, 55%, 55%)",
-  "hsl(260, 50%, 55%)",
-  "hsl(152, 60%, 42%)",
-  "hsl(152, 60%, 35%)",
-];
+type StudentDoc = {
+  instituteId: string;
+  name: string;
+  branch: string;
+  batch: string;
+  cgpa: number;
+};
+
+type Student = StudentDoc & { id: string };
+
+type AppDoc = {
+  instituteId: string;
+  studentId: string;
+  studentName: string;
+  company: string;
+  role: string;
+  status: string;
+  appliedAt?: Timestamp | null;
+  createdAt?: any;
+  updatedAt?: any;
+};
+
+type Application = AppDoc & { id: string };
+
+function toDate(ts?: Timestamp | null) {
+  if (!ts) return null;
+  return ts.toDate();
+}
+
+function msAny(ts: any) {
+  try {
+    if (!ts) return 0;
+    if (typeof ts.toMillis === "function") return ts.toMillis();
+    if (typeof ts.toDate === "function") return ts.toDate().getTime();
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+function normalizeStatus(s: string) {
+  const x = (s ?? "").toLowerCase();
+  if (x.includes("joined")) return "Joined";
+  if (x.includes("offer")) return "Offer";
+  if (x.includes("reject")) return "Rejected";
+  if (x.includes("interview")) return "Interview";
+  if (x.includes("oa")) return "OA";
+  if (x.includes("applied")) return "Applied";
+  return "Other";
+}
+
+function weekKey(d: Date) {
+  // week starting Monday
+  const t = new Date(d);
+  const day = (t.getDay() + 6) % 7; // Mon=0
+  t.setDate(t.getDate() - day);
+  t.setHours(0, 0, 0, 0);
+  return t.toISOString().slice(0, 10);
+}
 
 export default function Analytics() {
-  const [activeTab, setActiveTab] = useState(0);
+  const { profile } = useAuth();
+  const instituteId = profile?.instituteId ?? null;
+
+  const [loading, setLoading] = useState(true);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [apps, setApps] = useState<Application[]>([]);
+
+  useEffect(() => {
+    if (!instituteId) return;
+
+    setLoading(true);
+
+    const u1 = onSnapshot(
+      query(
+        collection(db, "students"),
+        where("instituteId", "==", instituteId),
+      ),
+      (snap) => {
+        const list: Student[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as StudentDoc),
+        }));
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        setStudents(list);
+      },
+    );
+
+    const u2 = onSnapshot(
+      query(
+        collection(db, "applications"),
+        where("instituteId", "==", instituteId),
+      ),
+      (snap) => {
+        const list: Application[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as AppDoc),
+        }));
+        setApps(list);
+        setLoading(false);
+      },
+    );
+
+    return () => {
+      u1();
+      u2();
+    };
+  }, [instituteId]);
+
+  const studentMap = useMemo(() => {
+    const m = new Map<string, Student>();
+    students.forEach((s) => m.set(s.id, s));
+    return m;
+  }, [students]);
+
+  const funnel = useMemo(() => {
+    const counts: Record<string, number> = {
+      Applied: 0,
+      OA: 0,
+      Interview: 0,
+      Offer: 0,
+      Joined: 0,
+      Rejected: 0,
+      Other: 0,
+    };
+    for (const a of apps) {
+      counts[normalizeStatus(a.status)] =
+        (counts[normalizeStatus(a.status)] ?? 0) + 1;
+    }
+    return counts;
+  }, [apps]);
+
+  const funnelPie = useMemo(() => {
+    const keys = ["Applied", "OA", "Interview", "Offer", "Joined", "Rejected"];
+    return keys
+      .map((k) => ({ name: k, value: funnel[k] ?? 0 }))
+      .filter((x) => x.value > 0);
+  }, [funnel]);
+
+  const topCompanies = useMemo(() => {
+    const m = new Map<string, number>();
+    apps.forEach((a) => m.set(a.company, (m.get(a.company) ?? 0) + 1));
+    const list = Array.from(m.entries()).map(([company, count]) => ({
+      company,
+      count,
+    }));
+    list.sort((a, b) => b.count - a.count);
+    return list.slice(0, 10);
+  }, [apps]);
+
+  const offersByBranch = useMemo(() => {
+    const m = new Map<string, number>();
+    apps.forEach((a) => {
+      const s = studentMap.get(a.studentId);
+      if (!s) return;
+      const st = normalizeStatus(a.status);
+      if (st === "Offer" || st === "Joined") {
+        m.set(s.branch, (m.get(s.branch) ?? 0) + 1);
+      }
+    });
+    const list = Array.from(m.entries()).map(([branch, offers]) => ({
+      branch,
+      offers,
+    }));
+    list.sort((a, b) => b.offers - a.offers);
+    return list;
+  }, [apps, studentMap]);
+
+  const weeklyTrend = useMemo(() => {
+    // last 8 weeks
+    const now = new Date();
+    const weeks: string[] = [];
+    for (let i = 7; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i * 7);
+      weeks.push(weekKey(d));
+    }
+    const m = new Map<string, number>();
+    weeks.forEach((w) => m.set(w, 0));
+
+    apps.forEach((a) => {
+      const d =
+        toDate(a.appliedAt ?? null) ??
+        (msAny(a.createdAt) ? new Date(msAny(a.createdAt)) : null);
+      if (!d) return;
+      const wk = weekKey(d);
+      if (m.has(wk)) m.set(wk, (m.get(wk) ?? 0) + 1);
+    });
+
+    return weeks.map((w) => ({
+      week: w.slice(5),
+      applications: m.get(w) ?? 0,
+    }));
+  }, [apps]);
+
+  const exportReport = () => {
+    const rows = apps.map((a) => {
+      const s = studentMap.get(a.studentId);
+      return {
+        student: a.studentName,
+        branch: s?.branch ?? "",
+        batch: s?.batch ?? "",
+        company: a.company,
+        role: a.role,
+        status: a.status,
+        appliedAt: toDate(a.appliedAt ?? null)?.toISOString?.() ?? "",
+      };
+    });
+    downloadCSV(`tejaskrit_report_${Date.now()}.csv`, rows);
+  };
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Analytics</h1>
-          <p className="text-sm text-muted-foreground mt-1">Placement insights & reporting</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            Live funnel and trends from Firestore
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm"><Download className="w-4 h-4 mr-1.5" /> Download PDF</Button>
-          <Button variant="outline" size="sm"><Download className="w-4 h-4 mr-1.5" /> Export CSV</Button>
-        </div>
+
+        <Button variant="outline" onClick={exportReport}>
+          <Download className="w-4 h-4 mr-2" /> Export CSV
+        </Button>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 bg-secondary/50 p-1 rounded-xl w-fit">
-        {tabs.map((tab, i) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(i)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-              i === activeTab ? "bg-card text-foreground card-shadow" : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab Content */}
-      {activeTab === 0 && (
-        <div className="bg-card rounded-xl p-6 card-shadow border border-border">
-          <h2 className="text-base font-semibold text-foreground mb-6">Overall Placement Funnel</h2>
-          <ResponsiveContainer width="100%" height={320}>
-            <BarChart data={analyticsChartData.funnel} barSize={64}>
-              <XAxis dataKey="name" tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
-              <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid hsl(225, 18%, 90%)", fontSize: 13 }} />
-              <Bar dataKey="value" radius={[8, 8, 0, 0]}>
-                {analyticsChartData.funnel.map((_, i) => (
-                  <Cell key={i} fill={funnelColors[i]} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+      {loading ? (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
         </div>
-      )}
+      ) : (
+        <>
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <Card className="card-shadow">
+              <CardHeader>
+                <CardTitle className="text-base">Placement Funnel</CardTitle>
+              </CardHeader>
+              <CardContent className="h-[260px]">
+                {funnelPie.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    No data yet.
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={funnelPie}
+                        dataKey="value"
+                        nameKey="name"
+                        outerRadius={90}
+                        fill="hsl(var(--primary))"
+                        label
+                      />
+                      <Tooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                )}
+              </CardContent>
+            </Card>
 
-      {activeTab === 1 && (
-        <div className="bg-card rounded-xl p-6 card-shadow border border-border">
-          <h2 className="text-base font-semibold text-foreground mb-6">Company Performance</h2>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Company", "Applications", "Offers", "Conversion %"].map((h) => (
-                    <th key={h} className="text-left text-xs font-semibold text-muted-foreground px-5 py-3">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {analyticsChartData.companyPerformance.map((c, i) => (
-                  <tr key={i} className="border-b border-border last:border-0">
-                    <td className="px-5 py-3.5 text-sm font-medium text-foreground">{c.company}</td>
-                    <td className="px-5 py-3.5 text-sm text-foreground">{c.applications}</td>
-                    <td className="px-5 py-3.5 text-sm text-foreground">{c.offers}</td>
-                    <td className="px-5 py-3.5 text-sm font-medium text-primary">{c.conversion}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <Card className="card-shadow xl:col-span-2">
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Weekly Applications (Last 8 weeks)
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="h-[260px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={weeklyTrend}>
+                    <XAxis dataKey="week" />
+                    <YAxis allowDecimals={false} />
+                    <Tooltip />
+                    <Bar
+                      dataKey="applications"
+                      fill="hsl(var(--primary))"
+                      radius={[6, 6, 0, 0]}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
           </div>
-        </div>
-      )}
 
-      {activeTab === 2 && (
-        <div className="bg-card rounded-xl p-6 card-shadow border border-border">
-          <h2 className="text-base font-semibold text-foreground mb-6">Branch-wise Placement</h2>
-          <ResponsiveContainer width="100%" height={320}>
-            <BarChart data={analyticsChartData.branchInsights} barSize={48}>
-              <XAxis dataKey="branch" tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
-              <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid hsl(225, 18%, 90%)", fontSize: 13 }} />
-              <Bar dataKey="placed" fill="hsl(238, 55%, 48%)" radius={[8, 8, 0, 0]} name="Placed" />
-              <Bar dataKey="total" fill="hsl(225, 18%, 90%)" radius={[8, 8, 0, 0]} name="Total" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <Card className="card-shadow">
+              <CardHeader>
+                <CardTitle className="text-base">Top Companies</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {topCompanies.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    No data yet.
+                  </div>
+                ) : (
+                  topCompanies.map((c) => (
+                    <div
+                      key={c.company}
+                      className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30"
+                    >
+                      <span className="text-sm text-foreground">
+                        {c.company}
+                      </span>
+                      <Badge variant="secondary">{c.count}</Badge>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
 
-      {activeTab === 3 && (
-        <div className="bg-card rounded-xl p-6 card-shadow border border-border">
-          <h2 className="text-base font-semibold text-foreground mb-6">Weekly Application Trends</h2>
-          <ResponsiveContainer width="100%" height={320}>
-            <LineChart data={analyticsChartData.weeklyTrends}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(225, 18%, 90%)" />
-              <XAxis dataKey="week" tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
-              <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid hsl(225, 18%, 90%)", fontSize: 13 }} />
-              <Line type="monotone" dataKey="applications" stroke="hsl(238, 55%, 48%)" strokeWidth={2.5} dot={{ r: 4 }} name="Applications" />
-              <Line type="monotone" dataKey="offers" stroke="hsl(152, 60%, 42%)" strokeWidth={2.5} dot={{ r: 4 }} name="Offers" />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+            <Card className="card-shadow">
+              <CardHeader>
+                <CardTitle className="text-base">Offers by Branch</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {offersByBranch.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    No offers yet.
+                  </div>
+                ) : (
+                  offersByBranch.map((b) => (
+                    <div
+                      key={b.branch}
+                      className="flex items-center justify-between p-2.5 rounded-lg bg-secondary/30"
+                    >
+                      <span className="text-sm text-foreground">
+                        {b.branch}
+                      </span>
+                      <Badge variant="secondary">{b.offers}</Badge>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </>
       )}
-
-      {/* Pagination mock */}
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">Showing 1-10 of 24 records</p>
-        <div className="flex items-center gap-1">
-          <Button variant="outline" size="sm" disabled>Previous</Button>
-          <Button variant="outline" size="sm" className="bg-primary text-primary-foreground">1</Button>
-          <Button variant="outline" size="sm">2</Button>
-          <Button variant="outline" size="sm">3</Button>
-          <Button variant="outline" size="sm">Next</Button>
-        </div>
-      </div>
     </div>
   );
 }
