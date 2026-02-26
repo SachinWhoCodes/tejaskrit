@@ -47,12 +47,11 @@ import {
   listInstituteJobs,
   listPublicJobs,
   listRecommendations,
-  requestResumeGeneration,
   saveMasterProfile,
   saveUserConsents,
-  upsertApplicationForJob,
   deleteUserData,
 } from "@/lib/firestore";
+import { downloadResumePdf, generateTailoredLatex } from "@/lib/api";
 import type { MasterProfileDoc, UserDoc } from "@/lib/types";
 import { computeMatch } from "@/lib/match";
 import { toast } from "@/hooks/use-toast";
@@ -64,8 +63,9 @@ type TailoredResumeUI = {
   role: string;
   generatedAt?: string;
   status: "Ready" | "Generating" | "Failed";
-  pdfUrl?: string;
-  latexDocPath?: string;
+  latex?: string;
+  pdfUrl?: string; // legacy
+  latexDocPath?: string; // legacy
   genId?: string;
 };
 
@@ -179,6 +179,7 @@ export default function Resume() {
         const jobId = jobIdFromAny(a.data.jobId);
         const job = map[jobId];
         const pdfUrl = a.data.tailoredResume?.pdfUrl;
+        const latex = a.data.tailoredResume?.latex;
         const genId = a.data.tailoredResume?.genId;
         const generatedAt = (a.data.tailoredResume?.generatedAt as any)?.toMillis?.()
           ? new Date((a.data.tailoredResume?.generatedAt as any).toMillis()).toLocaleDateString()
@@ -189,8 +190,9 @@ export default function Resume() {
           company: job?.company ?? "(Company)",
           role: job?.title ?? "(Role)",
           generatedAt,
-          status: pdfUrl ? "Ready" : genId ? "Generating" : "Failed",
-          pdfUrl: pdfUrl,
+          status: latex ? "Ready" : genId ? "Generating" : "Failed",
+          latex,
+          pdfUrl,
           latexDocPath: a.data.tailoredResume?.latexDocPath,
           genId,
         };
@@ -312,18 +314,11 @@ export default function Resume() {
         return;
       }
 
-      // Upsert an application and create a generation request
-      const appId = await upsertApplicationForJob({
-        uid: authUser.uid,
-        instituteId: userDoc?.instituteId ?? null,
-        jobId,
-        status: "tailored",
-      });
-      await requestResumeGeneration({ uid: authUser.uid, jobId, applicationId: appId });
+      await generateTailoredLatex({ jobId });
 
       toast({
-        title: "Resume request created",
-        description: "We saved a resume generation request (process it via Cloud Function/worker).",
+        title: "Tailored resume generated",
+        description: "LaTeX saved to your tracker. Download it from Tailored Resumes tab.",
       });
 
       setGenerateOpen(false);
@@ -339,8 +334,9 @@ export default function Resume() {
   const regenerate = async (r: TailoredResumeUI) => {
     if (!authUser?.uid) return;
     try {
-      await requestResumeGeneration({ uid: authUser.uid, jobId: r.jobId, applicationId: r.applicationId });
-      toast({ title: "Regeneration requested", description: "A new generation request was created." });
+      await generateTailoredLatex({ jobId: r.jobId });
+      toast({ title: "Regenerated", description: "Updated LaTeX stored. Download again." });
+      qc.invalidateQueries({ queryKey: ["applications", authUser.uid] });
     } catch (e: any) {
       toast({ title: "Failed", description: e?.message ?? "Could not request.", variant: "destructive" });
     }
@@ -379,6 +375,10 @@ export default function Resume() {
       toast({ title: "Delete failed", description: e?.message ?? "Could not delete.", variant: "destructive" });
     }
   };
+
+  // View LaTeX dialog
+  const [latexOpen, setLatexOpen] = useState(false);
+  const [latexText, setLatexText] = useState<string>("");
 
   return (
     <AppLayout>
@@ -823,12 +823,16 @@ export default function Resume() {
                             variant="ghost"
                             size="icon"
                             className="h-8 w-8"
-                            onClick={() => {
-                              if (!r.pdfUrl) {
-                                toast({ title: "Not ready", description: "PDF link not available yet." });
-                                return;
+                            onClick={async () => {
+                              try {
+                                if (r.status !== "Ready") {
+                                  toast({ title: "Not ready", description: "Generate resume first." });
+                                  return;
+                                }
+                                await downloadResumePdf(r.applicationId);
+                              } catch (e: any) {
+                                toast({ title: "Download failed", description: e?.message ?? "Try again.", variant: "destructive" });
                               }
-                              window.open(r.pdfUrl, "_blank", "noopener,noreferrer");
                             }}
                           >
                             <Download className="h-3.5 w-3.5" />
@@ -837,7 +841,14 @@ export default function Resume() {
                             variant="ghost"
                             size="icon"
                             className="h-8 w-8"
-                            onClick={() => toast({ title: "LaTeX", description: r.latexDocPath ? r.latexDocPath : "Not available yet." })}
+                            onClick={() => {
+                              if (!r.latex) {
+                                toast({ title: "Not ready", description: "LaTeX not available yet." });
+                                return;
+                              }
+                              setLatexText(r.latex);
+                              setLatexOpen(true);
+                            }}
                           >
                             <Code className="h-3.5 w-3.5" />
                           </Button>
@@ -1004,7 +1015,7 @@ export default function Resume() {
                     </>
                   ) : (
                     <>
-                      <FileText className="h-3.5 w-3.5" /> Create Request
+                      <FileText className="h-3.5 w-3.5" /> Generate Resume
                     </>
                   )}
                 </Button>
@@ -1061,12 +1072,35 @@ export default function Resume() {
                     </>
                   ) : (
                     <>
-                      <FileText className="h-3.5 w-3.5" /> Create Request
+                      <FileText className="h-3.5 w-3.5" /> Generate Resume
                     </>
                   )}
                 </Button>
               </div>
             )}
+          </DialogContent>
+        </Dialog>
+
+        {/* View LaTeX */}
+        <Dialog open={latexOpen} onOpenChange={setLatexOpen}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>Tailored Resume LaTeX</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                This LaTeX is saved in Firestore. Download as PDF anytime using the Download button.
+              </p>
+              <pre className="text-xs bg-muted rounded-lg p-4 overflow-auto max-h-[60vh] whitespace-pre-wrap">
+                {latexText}
+              </pre>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => navigator.clipboard.writeText(latexText).catch(() => void 0)}>
+                  Copy
+                </Button>
+                <Button onClick={() => setLatexOpen(false)}>Close</Button>
+              </div>
+            </div>
           </DialogContent>
         </Dialog>
       </div>

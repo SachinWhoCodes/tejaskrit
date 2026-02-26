@@ -127,6 +127,9 @@ export interface ApplicationDoc {
   appliedAt?: Timestamp | null;
 
   tailoredResume?: {
+    // We store LaTeX directly in Firestore (no Firebase Storage needed).
+    latex?: string;
+    // Legacy/optional fields (safe to keep for future):
     pdfUrl?: string;
     latexDocPath?: string;
     generatedAt?: Timestamp;

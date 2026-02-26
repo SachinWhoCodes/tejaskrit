@@ -31,9 +31,9 @@ import {
   listInstituteJobs,
   listPublicJobs,
   listRecommendations,
-  requestResumeGeneration,
   upsertApplicationForJob,
 } from "@/lib/firestore";
+import { generateTailoredLatex } from "@/lib/api";
 import type { JobDoc } from "@/lib/types";
 import { computeMatch } from "@/lib/match";
 import { sourceLabel, type JobSourceLabel } from "@/lib/mappers";
@@ -222,16 +222,15 @@ export default function Jobs() {
   const actionGenerateResume = async (job: JobUI) => {
     if (!authUser?.uid) return;
     await ensureConsentThen(async () => {
-      const appId = await upsertApplicationForJob({
-        uid: authUser.uid,
-        instituteId: userDoc?.instituteId ?? null,
+      await generateTailoredLatex({
         jobId: job.id,
-        status: "tailored",
         matchScore: job.matchScore,
         matchReasons: job.matchReasons,
       });
-      await requestResumeGeneration({ uid: authUser.uid, jobId: job.id, applicationId: appId });
-      toast({ title: "Resume request created", description: "A worker/CF can process this request." });
+      toast({
+        title: "Tailored resume generated",
+        description: "We saved the LaTeX resume to your tracker. Download it from Resume → Tailored.",
+      });
       qc.invalidateQueries({ queryKey: ["applications", authUser.uid] });
     });
   };

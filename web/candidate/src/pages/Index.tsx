@@ -29,9 +29,8 @@ import {
   listInstituteJobs,
   listRecommendations,
   listUpcomingEvents,
-  requestResumeGeneration,
-  upsertApplicationForJob,
 } from "@/lib/firestore";
+import { generateTailoredLatex } from "@/lib/api";
 import type { JobDoc } from "@/lib/types";
 import { computeMatch } from "@/lib/match";
 import { sourceLabel } from "@/lib/mappers";
@@ -148,7 +147,7 @@ export default function Dashboard() {
     .slice(0, 5)
     .map((a) => ({
       id: a.id,
-      text: `Updated: ${String(a.data.status).replace(/_/g, " ")} — ${jobIdFromAny(a.data.jobId)}`,
+      text: `Updated: ${a.data.status.replace(/_/g, " ")} — ${jobIdFromAny(a.data.jobId)}`,
       time: a.data.updatedAt ? timeAgo((a.data.updatedAt as any).toMillis?.()) : "—",
       icon: a.data.status === "tailored" ? "file" : a.data.status === "applied" ? "check" : "calendar",
     }));
@@ -156,16 +155,8 @@ export default function Dashboard() {
   const onGenerateResumeQuick = async (job: JobUI) => {
     if (!authUser?.uid) return;
     try {
-      const appId = await upsertApplicationForJob({
-        uid: authUser.uid,
-        instituteId: userDoc?.instituteId ?? null,
-        jobId: job.id,
-        status: "tailored",
-        matchScore: job.matchScore,
-        matchReasons: job.matchReasons,
-      });
-      await requestResumeGeneration({ uid: authUser.uid, jobId: job.id, applicationId: appId });
-      toast({ title: "Resume request created", description: "Generation request saved. (Worker/CF can process it.)" });
+      await generateTailoredLatex({ jobId: job.id, matchScore: job.matchScore, matchReasons: job.matchReasons });
+      toast({ title: "Tailored resume generated", description: "LaTeX saved. Download from Resume → Tailored." });
     } catch (e: any) {
       toast({ title: "Failed", description: e?.message ?? "Could not request resume.", variant: "destructive" });
     }
