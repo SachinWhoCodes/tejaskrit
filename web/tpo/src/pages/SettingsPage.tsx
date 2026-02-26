@@ -48,7 +48,9 @@ export default function SettingsPage() {
             <p className="text-xs text-muted-foreground">
               This TPO panel is aligned with the Candidate app schema:
               <span className="block mt-1">• Drives are stored in <code>/jobs</code> as visibility=<code>institute</code>, source=<code>tpo</code></span>
-              <span className="block">• Students are read from <code>/institutes/{{'{id}'}}/members</code></span>
+              <span className="block">
+                • Students are read from <code>{"/institutes/{instituteId}/members"}</code>
+              </span>
               <span className="block">• Applications are read from <code>/applications</code> filtered by instituteId</span>
             </p>
           </CardContent>

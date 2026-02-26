@@ -176,7 +176,9 @@ export default function Students() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Students</h1>
-          <p className="text-sm text-muted-foreground mt-1">Pulled from /institutes/{{instituteId}}/members</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            Pulled from <code>{"/institutes/{instituteId}/members"}</code>
+          </p>
         </div>
       </div>
 
