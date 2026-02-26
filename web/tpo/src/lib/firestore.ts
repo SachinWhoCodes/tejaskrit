@@ -75,8 +75,35 @@ export async function upsertInstituteAndMakeTpo(args: {
   const instituteName = args.instituteName.trim();
   if (!instituteName) throw new Error("Institute name is required");
 
-  const instituteId = slugify(instituteName);
-  if (!instituteId) throw new Error("Invalid institute name");
+  // ------------------------------
+  // IMPORTANT:
+  // Older versions of the app (and some manual Firebase setups) created institutes
+  // with auto-generated doc IDs. Candidates may also create institutes using a slug.
+  // To avoid duplicates, we RESOLVE an existing institute doc by code/name first.
+  // Priority: instituteCode -> exact name -> fallback create.
+  // ------------------------------
+
+  const codeUpper = args.instituteCode?.trim() ? args.instituteCode.trim().toUpperCase() : "";
+
+  // Try resolve by code
+  let instituteId: string | null = null;
+  if (codeUpper) {
+    const qByCode = query(collection(db, "institutes"), where("code", "==", codeUpper), limit(1));
+    const snap = await getDocs(qByCode);
+    if (!snap.empty) instituteId = snap.docs[0]!.id;
+  }
+
+  // Try resolve by exact name
+  if (!instituteId) {
+    const qByName = query(collection(db, "institutes"), where("name", "==", instituteName), limit(1));
+    const snap = await getDocs(qByName);
+    if (!snap.empty) instituteId = snap.docs[0]!.id;
+  }
+
+  // Create deterministic id only if not found
+  if (!instituteId) {
+    instituteId = codeUpper || slugify(instituteName);
+  }
 
   const instRef = doc(db, "institutes", instituteId);
   const memRef = doc(db, "institutes", instituteId, "members", args.uid);
@@ -86,7 +113,7 @@ export async function upsertInstituteAndMakeTpo(args: {
 
   const instDoc: Partial<InstituteDoc> = {
     name: instituteName,
-    code: args.instituteCode?.trim() ? args.instituteCode.trim().toUpperCase() : undefined,
+    code: codeUpper || undefined,
     domainsAllowed: args.domainsAllowed.map((d) => d.trim().toLowerCase()).filter(Boolean),
     isActive: true,
     createdBy: args.uid,
