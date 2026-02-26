@@ -1,3 +1,4 @@
+// src/pages/Jobs.tsx
 import { useMemo, useState } from "react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { SourceBadge } from "@/components/SourceBadge";
@@ -11,30 +12,19 @@ import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Search,
-  ExternalLink,
-  FileText,
-  BookmarkPlus,
-  Clock,
-  Filter,
-  X,
-  Flag,
-} from "lucide-react";
+import { Search, ExternalLink, FileText, BookmarkPlus, Clock, Filter, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { useAuth } from "@/contexts/AuthProvider";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  getJobsByIds,
   getMasterProfile,
   jobIdFromAny,
-  listInstituteJobs,
-  listPublicJobs,
-  listRecommendations,
+  listApplications,
+  listJobsFeedForUser,
   upsertApplicationForJob,
 } from "@/lib/firestore";
 import { generateTailoredLatex } from "@/lib/api";
-import type { JobDoc } from "@/lib/types";
+import type { ApplicationDoc, JobDoc } from "@/lib/types";
 import { computeMatch } from "@/lib/match";
 import { sourceLabel, type JobSourceLabel } from "@/lib/mappers";
 import { toast } from "@/hooks/use-toast";
@@ -52,6 +42,8 @@ type JobUI = {
   description: string;
   skills: string[];
   applyUrl?: string;
+  visibility?: "public" | "institute" | "private";
+  appStatus?: ApplicationDoc["status"];
 };
 
 function timeAgo(dateMs?: number) {
@@ -65,8 +57,13 @@ function timeAgo(dateMs?: number) {
   return `${days} days ago`;
 }
 
+function jobTimeMs(j: JobDoc) {
+  const a: any = j;
+  return a?.lastSeenAt?.toMillis?.() || a?.postedAt?.toMillis?.() || a?.createdAt?.toMillis?.() || a?.updatedAt?.toMillis?.() || 0;
+}
+
 function toJobUI(id: string, j: JobDoc, score: number, reasons: string[], instituteVerified = false): JobUI {
-  const lastSeenMs = (j.lastSeenAt as any)?.toMillis?.() ?? (j.postedAt as any)?.toMillis?.();
+  const lastSeenMs = jobTimeMs(j);
   return {
     id,
     title: j.title,
@@ -80,6 +77,7 @@ function toJobUI(id: string, j: JobDoc, score: number, reasons: string[], instit
     description: j.jdText || "",
     skills: j.tags || [],
     applyUrl: j.applyUrl,
+    visibility: j.visibility,
   };
 }
 
@@ -103,49 +101,60 @@ export default function Jobs() {
     queryKey: ["masterProfile", authUser?.uid],
     enabled: !!authUser?.uid,
     queryFn: () => getMasterProfile(authUser!.uid),
+    staleTime: 30_000,
   });
 
-  const { data: allJobs, isLoading } = useQuery({
-    queryKey: ["jobsFeed", authUser?.uid],
+  // ✅ applications map (to show Applied/Saved/Tailored on jobs list)
+  const { data: apps } = useQuery({
+    queryKey: ["applications", authUser?.uid],
     enabled: !!authUser?.uid,
-    queryFn: async () => {
-      if (!authUser?.uid) return [] as JobUI[];
-      const recs = await listRecommendations(authUser.uid, 60);
-      if (recs.length > 0) {
-        const ids = recs.map((r) => jobIdFromAny(r.data.jobId ?? r.id));
-        const map = await getJobsByIds(ids);
-        return recs
-          .map((r) => {
-            const id = jobIdFromAny(r.data.jobId ?? r.id);
-            const j = map[id];
-            if (!j) return null;
-            return toJobUI(id, j, r.data.score, r.data.reasons ?? []);
-          })
-          .filter(Boolean) as JobUI[];
-      }
-
-      // fallback: latest public jobs + client-side match
-      const latest = await listPublicJobs(60);
-      return latest.map((j) => {
-        const m = computeMatch(j.data, profile);
-        return toJobUI(j.id, j.data, m.score, m.reasons);
-      });
-    },
-    staleTime: 30_000,
+    queryFn: () => listApplications(authUser!.uid),
+    staleTime: 10_000,
   });
 
-  const { data: instituteJobs } = useQuery({
-    queryKey: ["instituteJobs", userDoc?.instituteId],
-    enabled: !!userDoc?.instituteId,
-    queryFn: async () => {
-      const jobs = await listInstituteJobs(userDoc!.instituteId!, 60);
-      return jobs.map((j) => {
-        const m = computeMatch(j.data, profile);
-        return toJobUI(j.id, j.data, m.score, m.reasons, true);
-      });
-    },
-    staleTime: 30_000,
+  const appByJobId = useMemo(() => {
+    const m = new Map<string, ApplicationDoc>();
+    (apps ?? []).forEach((a) => m.set(jobIdFromAny(a.data.jobId), a.data));
+    return m;
+  }, [apps]);
+
+  // ✅ jobs feed without composite indexes
+  const { data: feedRows, isLoading } = useQuery({
+    queryKey: ["jobsFeed", authUser?.uid, userDoc?.instituteId],
+    enabled: !!authUser?.uid,
+    queryFn: () =>
+      listJobsFeedForUser({
+        uid: authUser!.uid,
+        instituteId: userDoc?.instituteId ?? null,
+        take: 150,
+      }),
+    staleTime: 20_000,
   });
+
+  const allJobs = useMemo(() => {
+    const rows = feedRows ?? [];
+    return rows
+      .map((r) => {
+        const job = r.data;
+        const app = appByJobId.get(r.id);
+        const match = computeMatch(job, profile);
+        const ui = toJobUI(
+          r.id,
+          job,
+          app?.matchScore ?? match.score,
+          (app?.matchReasons?.length ? app.matchReasons : match.reasons) ?? [],
+          job.visibility === "institute"
+        );
+        ui.appStatus = app?.status;
+        return ui;
+      })
+      .sort((a, b) => b.matchScore - a.matchScore);
+  }, [feedRows, appByJobId, profile]);
+
+  const instituteJobs = useMemo(
+    () => (allJobs ?? []).filter((j) => j.visibility === "institute"),
+    [allJobs]
+  );
 
   const allSources: JobSourceLabel[] = ["Career Page", "Telegram", "Institute Verified", "Extension", "Manual"];
 
@@ -178,7 +187,6 @@ export default function Jobs() {
   const ensureConsentThen = async (fn: () => Promise<void>) => {
     if (consentHidden) return fn();
     setConsentOpen(true);
-    // store the pending action in state by closing modal only when continue
     (window as any).__tejaskrit_pending = fn;
   };
 
@@ -229,7 +237,7 @@ export default function Jobs() {
       });
       toast({
         title: "Tailored resume generated",
-        description: "We saved the LaTeX resume to your tracker. Download it from Resume → Tailored.",
+        description: "LaTeX saved in tracker. Open Resume → Tailored.",
       });
       qc.invalidateQueries({ queryKey: ["applications", authUser.uid] });
     });
@@ -237,7 +245,7 @@ export default function Jobs() {
 
   const actionApply = async (job: JobUI) => {
     if (job.applyUrl) window.open(job.applyUrl, "_blank", "noopener,noreferrer");
-    // best-effort: save as "saved" so it appears in tracker
+    // ensure it appears in tracker at least as saved
     await actionSave(job);
   };
 
@@ -322,7 +330,6 @@ export default function Jobs() {
                 </Button>
               )}
 
-              {/* Mobile search */}
               <div className="lg:hidden mb-4">
                 <div className="relative">
                   <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
@@ -345,9 +352,10 @@ export default function Jobs() {
                   onApply={actionApply}
                 />
               </TabsContent>
+
               <TabsContent value="institute" className="mt-0">
                 <JobList
-                  loading={false}
+                  loading={isLoading}
                   jobs={filteredInstitute}
                   onSelect={setSelectedJob}
                   onSave={actionSave}
@@ -370,15 +378,23 @@ export default function Jobs() {
                     {selectedJob.company} · {selectedJob.location}
                   </p>
                 </DialogHeader>
+
                 <div className="space-y-4 mt-4">
                   <div className="flex items-center gap-3">
                     <MatchScore score={selectedJob.matchScore} size="lg" />
                     <SourceBadge source={selectedJob.source} />
+                    {selectedJob.appStatus ? (
+                      <Badge variant="secondary" className="ml-auto">
+                        {String(selectedJob.appStatus).replace(/_/g, " ")}
+                      </Badge>
+                    ) : null}
                   </div>
+
                   <div>
                     <h4 className="text-sm font-semibold mb-2">Description</h4>
                     <p className="text-sm text-muted-foreground whitespace-pre-wrap">{selectedJob.description || "—"}</p>
                   </div>
+
                   <div>
                     <h4 className="text-sm font-semibold mb-2">Match Breakdown</h4>
                     <div className="space-y-1">
@@ -390,8 +406,9 @@ export default function Jobs() {
                       ))}
                     </div>
                   </div>
+
                   <div>
-                    <h4 className="text-sm font-semibold mb-2">Skills Required</h4>
+                    <h4 className="text-sm font-semibold mb-2">Skills</h4>
                     <div className="flex flex-wrap gap-1.5">
                       {(selectedJob.skills ?? []).map((s) => (
                         <Badge key={s} variant="secondary">
@@ -400,12 +417,19 @@ export default function Jobs() {
                       ))}
                     </div>
                   </div>
+
                   <div className="flex gap-2 pt-2">
                     <Button size="sm" className="gap-1" onClick={() => actionGenerateResume(selectedJob)}>
                       <FileText className="h-3.5 w-3.5" /> Generate Resume
                     </Button>
-                    <Button size="sm" variant="outline" className="gap-1" onClick={() => actionMarkApplied(selectedJob)}>
-                      Mark as Applied
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1"
+                      disabled={selectedJob.appStatus === "applied"}
+                      onClick={() => actionMarkApplied(selectedJob)}
+                    >
+                      {selectedJob.appStatus === "applied" ? "Applied" : "Mark as Applied"}
                     </Button>
                     <Button
                       size="sm"
@@ -429,8 +453,8 @@ export default function Jobs() {
               <DialogTitle>Data Consent</DialogTitle>
             </DialogHeader>
             <p className="text-sm text-muted-foreground">
-              We’ll use your master profile (skills, education, experience) to request a tailored resume. Your data stays private in
-              your Firebase project.
+              We’ll use your master profile (skills, education, experience) to generate a tailored LaTeX resume. You can disable this
+              anytime from Resume → Privacy.
             </p>
             <label className="flex items-center gap-2 mt-3 cursor-pointer">
               <Checkbox checked={consentDontShow} onCheckedChange={(v) => setConsentDontShow(Boolean(v))} />
@@ -473,7 +497,7 @@ function JobList({
   if (list.length === 0) {
     return (
       <div className="flex flex-col items-center py-16 text-center">
-        <p className="text-sm text-muted-foreground">No jobs match your filters.</p>
+        <p className="text-sm text-muted-foreground">No jobs match your filters (or none are visible yet).</p>
       </div>
     );
   }
@@ -481,13 +505,18 @@ function JobList({
   return (
     <div className="space-y-3">
       {list.map((job, i) => (
-        <motion.div key={job.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03 }}>
+        <motion.div key={job.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.02 }}>
           <Card className="card-elevated p-5 hover:cursor-pointer" onClick={() => onSelect(job)}>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 mb-1">
                   <h3 className="font-semibold text-sm">{job.title}</h3>
                   <SourceBadge source={job.source} />
+                  {job.appStatus ? (
+                    <Badge variant="secondary" className="ml-1">
+                      {String(job.appStatus).replace(/_/g, " ")}
+                    </Badge>
+                  ) : null}
                 </div>
                 <p className="text-xs text-muted-foreground mb-2">
                   {job.company} · {job.location} · {job.type}
@@ -505,9 +534,10 @@ function JobList({
               </div>
               <MatchScore score={job.matchScore} size="lg" />
             </div>
+
             <div className="flex gap-2 mt-3 pt-3 border-t border-border" onClick={(e) => e.stopPropagation()}>
-              <Button size="sm" variant="ghost" className="text-xs gap-1" onClick={() => onSave(job)}>
-                <BookmarkPlus className="h-3 w-3" /> Save
+              <Button size="sm" variant="ghost" className="text-xs gap-1" onClick={() => onSave(job)} disabled={!!job.appStatus}>
+                <BookmarkPlus className="h-3 w-3" /> {job.appStatus ? "In Tracker" : "Save"}
               </Button>
               <Button size="sm" variant="outline" className="text-xs gap-1" onClick={() => onGenerate(job)}>
                 <FileText className="h-3 w-3" /> Resume
@@ -515,18 +545,10 @@ function JobList({
               <Button size="sm" className="text-xs gap-1" onClick={() => onApply(job)}>
                 <ExternalLink className="h-3 w-3" /> Apply
               </Button>
-              <Button size="sm" variant="ghost" className="text-xs gap-1 ml-auto text-muted-foreground">
-                <Flag className="h-3 w-3" /> Report
-              </Button>
             </div>
           </Card>
         </motion.div>
       ))}
-      <div className="flex justify-center pt-4">
-        <Button variant="outline" size="sm" className="text-xs">
-          Load More
-        </Button>
-      </div>
     </div>
   );
 }

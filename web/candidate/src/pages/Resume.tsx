@@ -174,7 +174,13 @@ export default function Resume() {
     const rows = apps ?? [];
     const map = jobMap ?? {};
     return rows
-      .filter((a) => a.data.status === "tailored" || !!a.data.tailoredResume?.genId || !!a.data.tailoredResume?.pdfUrl)
+      .filter(
+        (a) =>
+          a.data.status === "tailored" ||
+          !!a.data.tailoredResume?.genId ||
+          !!a.data.tailoredResume?.pdfUrl ||
+          !!a.data.tailoredResume?.latex
+      )
       .map((a) => {
         const jobId = jobIdFromAny(a.data.jobId);
         const job = map[jobId];
