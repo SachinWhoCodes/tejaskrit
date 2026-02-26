@@ -20,17 +20,38 @@ import type { AnnouncementDoc, ApplicationDoc, InstituteDoc, InstituteMemberDoc,
 
 // -------- helpers --------
 
+// --- replace stripUndefinedDeep + tsMillis with this ---
+import { Timestamp } from "firebase/firestore";
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return Object.prototype.toString.call(v) === "[object Object]";
+}
+
 export function stripUndefinedDeep<T>(value: T): T {
   if (value === undefined) return undefined as unknown as T;
   if (value === null) return value;
+
+  // ✅ preserve Firestore special values
+  if (value instanceof Date) return value;
+  if (value instanceof Timestamp) return value;
+
+  // FieldValue (serverTimestamp(), arrayUnion, etc.) is NOT a plain object
+  // but in case it is treated as object, preserve non-plain objects:
+  const ctor = (value as any)?.constructor?.name;
+  if (ctor === "FieldValue") return value;
+
   if (Array.isArray(value)) {
     return value
       .filter((v) => v !== undefined)
       .map((v) => stripUndefinedDeep(v)) as unknown as T;
   }
+
   if (typeof value === "object") {
+    // ✅ only recurse into plain objects
+    if (!isPlainObject(value)) return value;
+
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    for (const [k, v] of Object.entries(value)) {
       if (v === undefined) continue;
       const vv = stripUndefinedDeep(v);
       if (vv === undefined) continue;
@@ -38,7 +59,22 @@ export function stripUndefinedDeep<T>(value: T): T {
     }
     return out as unknown as T;
   }
+
   return value;
+}
+
+function tsMillis(x: any): number {
+  if (!x) return 0;
+  if (typeof x?.toMillis === "function") return x.toMillis();
+  if (typeof x?.toDate === "function") return x.toDate().getTime();
+  if (typeof x?.seconds === "number") return x.seconds * 1000; // handles raw {seconds,nanoseconds}
+  if (x instanceof Date) return x.getTime();
+  if (typeof x === "number") return x;
+  if (typeof x === "string") {
+    const d = new Date(x);
+    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+  return 0;
 }
 
 export function jobIdFromAny(jobIdOrRef: string) {
@@ -46,12 +82,6 @@ export function jobIdFromAny(jobIdOrRef: string) {
   return jobIdOrRef.replace(/^\/?jobs\//, "");
 }
 
-function tsMillis(x: any): number {
-  if (!x) return 0;
-  if (typeof x?.toMillis === "function") return x.toMillis();
-  if (x instanceof Date) return x.getTime();
-  return 0;
-}
 
 export function jobSortKey(j: JobDoc): number {
   return (
